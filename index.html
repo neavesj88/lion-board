@@ -737,7 +737,7 @@ function renderTokens(){
     el.className='tok'+(t.flag?' flag':'')+(isBall?' ball':'')+(t._sel?' sel':'');
     el.style.left=p.x+'px'; el.style.top=p.y+'px';
     el.dataset.id=t.id;
-    const col = t.team==='home'?homeColor : t.team==='away'?awayColor : '#ddd';
+    const col = vHex(t.team==='home'?homeColor : t.team==='away'?awayColor : '#dddddd', '#888888');
 
     const D = tokD();
     if(isCone){ el.innerHTML=`<div class="cone"></div>`; tokLayer.appendChild(el); return; }
@@ -755,7 +755,7 @@ function renderTokens(){
     // to keep the number legible.
     const ring = ((t.role==='mid'||t.role==='midlong') && !showLabels) ? `<div class="midring" style="inset:${Math.max(3,Math.round(D*0.22))}px"></div>` : '';
     inner += `<div class="${discCls}" style="width:${D}px;height:${D}px;background:${col};font-size:${Math.max(9,Math.round(D*0.42))}px">
-                ${ring}<span class="lbl">${showLabels ? (t.label||'') : ''}</span></div>`;
+                ${ring}<span class="lbl">${showLabels ? escHtml(t.label||'') : ''}</span></div>`;
     el.innerHTML = inner;
     tokLayer.appendChild(el);
   });
@@ -1021,6 +1021,20 @@ function eraseShapeNear(f){
 
 /* ============ helpers ============ */
 function clamp(v,a,b){return v<a?a:v>b?b:v;}
+
+/* --- validation for anything read back from localStorage ---
+   A saved play or the prefs are same-origin data, but this page can be served
+   from a site that has other pages on the same origin, so nothing read from
+   storage is trusted on its way into innerHTML, style= or SVG attributes:
+   colours must be #rrggbb, roles/teams/enums come from a whitelist, numbers
+   must be finite and in range, and labels are cut down to letters and digits. */
+const HEX_RE=/^#[0-9a-f]{6}$/i;
+const ROLES=['attack','mid','midlong','defence','goalie','ball','cone'];
+function vHex(v,dflt){ return (typeof v==='string' && HEX_RE.test(v)) ? v : dflt; }
+function vNum(v,lo,hi,dflt){ const n=Number(v); return Number.isFinite(n) ? clamp(n,lo,hi) : dflt; }
+function vEnum(v,allowed,dflt){ return allowed.includes(v) ? v : dflt; }
+function vLabel(v){ return String(v==null?'':v).replace(/[^A-Za-z0-9]/g,'').slice(0,6); }
+function escHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
 function dist2f(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
 function haptic(){ if(navigator.vibrate) navigator.vibrate(12); }
@@ -1271,17 +1285,30 @@ $('#loadSlot').addEventListener('click',()=>{
   if(!raw){ toast('No saved play'); return; }
   try{
     const d=JSON.parse(raw);
-    tokens=(d.tokens||[]).map(t=>{
+    if(!d || typeof d!=='object') throw new Error('bad play');
+    // rebuild every token and shape from validated fields only; ids are
+    // reissued so a corrupt id can never poison the counters
+    let nid=1;
+    tokens=(Array.isArray(d.tokens)?d.tokens:[]).filter(t=>t && typeof t==='object').map(t=>{
       // migrate legacy roles from earlier versions
-      if(t.role==='short') t.role='mid';
-      if(t.role==='long')  t.role='defence';
-      if(!ROLE_LETTER[t.role] && t.role!=='ball' && t.role!=='cone') t.role='mid';
-      return t;
+      let role = t.role==='short' ? 'mid' : t.role==='long' ? 'defence' : t.role;
+      role = vEnum(role, ROLES, 'mid');
+      return { id:nid++, team:vEnum(t.team,['home','away','ball'],'home'), role,
+               x:vNum(t.x,-2,F.W+2,F.W/2), y:vNum(t.y,-2,F.L+2,F.L/2),
+               label:vLabel(t.label), flag:!!t.flag };
     });
-    shapes=d.shapes||[];
-    homeColor=d.homeColor||homeColor; awayColor=d.awayColor||awayColor;
-    drawColor=d.drawColor||drawColor; passColor=d.passColor||passColor; orient=d.orient||orient;
-    tid = tokens.reduce((m,t)=>Math.max(m,t.id),0)+1;
+    shapes=(Array.isArray(d.shapes)?d.shapes:[]).filter(s=>s && typeof s==='object').map(s=>({
+      id:sid++, type:vEnum(s.type,['arrow','pen'],'pen'),
+      color:vHex(s.color,drawColor), w:vNum(s.w,1,24,3),
+      dash:(s.dash==='9 7') ? '9 7' : '',   // the only dash pattern the app produces (pass arrows)
+      pts:(Array.isArray(s.pts)?s.pts:[]).filter(p=>p && typeof p==='object')
+          .map(p=>({x:vNum(p.x,-5,F.W+5,null), y:vNum(p.y,-5,F.L+5,null)}))
+          .filter(p=>p.x!==null && p.y!==null)
+    })).filter(s=>s.pts.length>=2);
+    homeColor=vHex(d.homeColor,homeColor); awayColor=vHex(d.awayColor,awayColor);
+    drawColor=vHex(d.drawColor,drawColor); passColor=vHex(d.passColor,passColor);
+    orient=vEnum(d.orient,['port','land'],orient);
+    tid=nid;
     drawField(); renderTokens(); renderShapes(); fitField(); buildSwatches();
     closeSheet('Menu'); toast('Play loaded');
   }catch(err){ toast('Load failed'); }
@@ -1434,16 +1461,18 @@ function savePrefs(){
 function loadPrefs(){
   try{
     const d=JSON.parse(localStorage.getItem('lion_prefs')||'{}');
-    if(d.theme){theme=d.theme;document.documentElement.setAttribute('data-theme',theme);document.body.setAttribute('data-theme',theme);}
-    if(d.orient)orient=d.orient;
-    if('showLabels'in d)showLabels=d.showLabels;
-    if('snap'in d)snap=d.snap;
-    if('tokenScale'in d)tokenScale=d.tokenScale;
-    if(d.bgColor)bgColor=d.bgColor;
-    if(d.homeColor)homeColor=d.homeColor;
-    if(d.awayColor)awayColor=d.awayColor;
-    if(d.drawColor)drawColor=d.drawColor;
-    if(d.passColor)passColor=d.passColor;
+    if(d && typeof d==='object'){
+      // every value is checked against what the UI can actually produce
+      theme=vEnum(d.theme,['light','dark'],theme);
+      document.documentElement.setAttribute('data-theme',theme); document.body.setAttribute('data-theme',theme);
+      orient=vEnum(d.orient,['port','land'],orient);
+      if('showLabels'in d)showLabels=!!d.showLabels;
+      if('snap'in d)snap=!!d.snap;
+      tokenScale=vNum(d.tokenScale,0.6,1.7,tokenScale);
+      bgColor=(d.bgColor==='auto') ? 'auto' : vHex(d.bgColor,bgColor);
+      homeColor=vHex(d.homeColor,homeColor); awayColor=vHex(d.awayColor,awayColor);
+      drawColor=vHex(d.drawColor,drawColor); passColor=vHex(d.passColor,passColor);
+    }
   }catch(e){}
   // reflect into UI segments
   document.querySelectorAll('#segOrient button').forEach(b=>b.classList.toggle('on',b.dataset.o===orient));
