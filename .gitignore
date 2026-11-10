@@ -9,3 +9,5 @@ Desktop.ini
 # Official Lacrosse Australia field-markings PDF — kept local, not redistributed
 docs-LA-Unified-Field-2024.pdf
 *.pdf
+# Claude Code local permissions can capture secrets from approved commands
+**/.claude/settings.local.json
